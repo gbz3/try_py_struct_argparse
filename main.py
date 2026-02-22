@@ -170,23 +170,16 @@ def validate_args(args: argparse.Namespace) -> Tuple[struct.Struct, List[Tuple[s
         sys.exit("エラー: フィールド名が指定されていません。")
     field_names = [name for name, _ in field_specs]
 
-    # フォーマットの要素数（パディング 'x' を除く）を計算
-    # struct.Struct には要素数を直接取得するプロパティがないため、ダミーデータでアンパックして要素数を数える
-    dummy_data = b'\x00' * st.size
-    try:
-        unpacked_dummy = st.unpack(dummy_data)
-        expected_fields_count = len(unpacked_dummy)
-    except struct.error as e:
-        sys.exit(f"エラー: フォーマットの検証に失敗しました: {e}")
-
-    if len(field_specs) != expected_fields_count:
+    # フォーマットの型コードリストを取得（パディング 'x' を除く）
+    # get_format_type_codes で要素数も確認できるため、ダミーアンパックは不要
+    type_codes = get_format_type_codes(args.format)
+    if len(field_specs) != len(type_codes):
         sys.exit(
             f"エラー: フィールド名の数 ({len(field_specs)}) が "
-            f"フォーマットの要素数 ({expected_fields_count}) と一致しません。"
+            f"フォーマットの要素数 ({len(type_codes)}) と一致しません。"
         )
 
     # :bcd アノテーションと型コードの整合チェック
-    type_codes = get_format_type_codes(args.format)
     for i, (name, annotation) in enumerate(field_specs):
         if annotation == 'bcd' and type_codes[i] not in ('s', 'p'):
             sys.exit(
@@ -203,7 +196,6 @@ def validate_args(args: argparse.Namespace) -> Tuple[struct.Struct, List[Tuple[s
 def main():
     args = parse_args()
     st, field_specs = validate_args(args)
-    field_names = [name for name, _ in field_specs]
 
     # 標準入力からバイナリモードで読み込む
     stdin_binary = sys.stdin.buffer
