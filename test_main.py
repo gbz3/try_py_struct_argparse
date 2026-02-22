@@ -1,6 +1,5 @@
 import io
 import struct
-import sys
 from unittest.mock import patch
 import pytest
 
