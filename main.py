@@ -2,9 +2,86 @@ import argparse
 import ast
 import codecs
 import json
+import re
 import struct
 import sys
-from typing import List, Tuple
+from typing import List, Optional, Tuple
+
+def get_format_type_codes(fmt: str) -> List[str]:
+    """
+    structフォーマット文字列から、各アンパック要素の型コードリストを返します（パディング 'x' を除く）。
+    例: '>I3sh' -> ['I', 's', 'h']
+        '3I'   -> ['I', 'I', 'I']
+    """
+    fmt_body = fmt.lstrip('@=<>!')
+    type_codes = []
+    for match in re.finditer(r'(\d*)([a-zA-Z?])', fmt_body):
+        count_str, code = match.groups()
+        count = int(count_str) if count_str else 1
+        if code == 'x':
+            continue  # パディング、値なし
+        elif code in ('s', 'p'):
+            type_codes.append(code)  # Ns は1つの bytes 値
+        else:
+            type_codes.extend([code] * count)  # 3I は3つの int 値
+    return type_codes
+
+def decode_bcd(data: bytes, sign_position: str) -> int:
+    """
+    パック10進数 (BCD) を整数に変換します。
+    sign_position:
+      'tail' : 最終バイトの下位ニブルが符号 (方式A/COBOL, デフォルト)
+      'head' : 先頭バイトの上位ニブルが符号 (方式B)
+      'none' : 符号なし、全ニブルが数字 (方式C)
+    符号ニブル: C(0xC)=正, D(0xD)=負, F(0xF)=符号なし(正)
+    """
+    if sign_position == 'tail':
+        sign_nibble = data[-1] & 0x0F
+        sign = -1 if sign_nibble == 0xD else 1
+        # 全バイトの上位ニブル + 最終バイト以外の下位ニブルが数字
+        nibbles = []
+        for i, byte in enumerate(data):
+            nibbles.append((byte >> 4) & 0x0F)
+            if i < len(data) - 1:
+                nibbles.append(byte & 0x0F)
+        value = int(''.join(str(n) for n in nibbles))
+        return sign * value
+    elif sign_position == 'head':
+        sign_nibble = (data[0] >> 4) & 0x0F
+        sign = -1 if sign_nibble == 0xD else 1
+        # 先頭バイトの下位ニブル以降が数字
+        nibbles = []
+        for i, byte in enumerate(data):
+            if i == 0:
+                nibbles.append(byte & 0x0F)
+            else:
+                nibbles.append((byte >> 4) & 0x0F)
+                nibbles.append(byte & 0x0F)
+        value = int(''.join(str(n) for n in nibbles))
+        return sign * value
+    else:  # 'none'
+        nibbles = []
+        for byte in data:
+            nibbles.append((byte >> 4) & 0x0F)
+            nibbles.append(byte & 0x0F)
+        return int(''.join(str(n) for n in nibbles))
+
+def parse_field_specs(fields_str: str) -> List[Tuple[str, Optional[str]]]:
+    """
+    フィールド名と型アノテーションをパースします。
+    例: 'id,price:bcd,name' -> [('id', None), ('price', 'bcd'), ('name', None)]
+    """
+    specs = []
+    for f in fields_str.split(','):
+        f = f.strip()
+        if not f:
+            continue
+        if ':' in f:
+            name, annotation = f.split(':', 1)
+            specs.append((name.strip(), annotation.strip()))
+        else:
+            specs.append((f, None))
+    return specs
 
 def is_safe_expression(expr: str, allowed_names: List[str]) -> bool:
     """
@@ -22,7 +99,7 @@ def is_safe_expression(expr: str, allowed_names: List[str]) -> bool:
             ast.Expression,
             ast.Compare, ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE,
             ast.BoolOp, ast.And, ast.Or,
-            ast.UnaryOp, ast.Not,
+            ast.UnaryOp, ast.Not, ast.USub, ast.UAdd,
             ast.BinOp, ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod, ast.FloorDiv, ast.Pow,
             ast.Constant, # 数値、文字列、True, False, None
             ast.Load
@@ -66,9 +143,15 @@ def parse_args() -> argparse.Namespace:
         default="cp932",
         help="文字列(bytes)をデコードする際のエンコーディング (デフォルト: cp932)"
     )
+    parser.add_argument(
+        "--bcd-sign",
+        choices=["tail", "head", "none"],
+        default="tail",
+        help="BCD符号の位置: tail=最終バイト下位ニブル(デフォルト/COBOL), head=先頭バイト上位ニブル, none=符号なし"
+    )
     return parser.parse_args()
 
-def validate_args(args: argparse.Namespace) -> Tuple[struct.Struct, List[str]]:
+def validate_args(args: argparse.Namespace) -> Tuple[struct.Struct, List[Tuple[str, Optional[str]]]]:
     # エンコーディングのチェック
     try:
         codecs.lookup(args.encoding)
@@ -81,10 +164,11 @@ def validate_args(args: argparse.Namespace) -> Tuple[struct.Struct, List[str]]:
     except struct.error as e:
         sys.exit(f"エラー: 無効なstructフォーマットです '{args.format}': {e}")
 
-    # フィールド名のパース
-    field_names = [f.strip() for f in args.fields.split(",") if f.strip()]
-    if not field_names:
+    # フィールド名と型アノテーションのパース
+    field_specs = parse_field_specs(args.fields)
+    if not field_specs:
         sys.exit("エラー: フィールド名が指定されていません。")
+    field_names = [name for name, _ in field_specs]
 
     # フォーマットの要素数（パディング 'x' を除く）を計算
     # struct.Struct には要素数を直接取得するプロパティがないため、ダミーデータでアンパックして要素数を数える
@@ -95,22 +179,32 @@ def validate_args(args: argparse.Namespace) -> Tuple[struct.Struct, List[str]]:
     except struct.error as e:
         sys.exit(f"エラー: フォーマットの検証に失敗しました: {e}")
 
-    if len(field_names) != expected_fields_count:
+    if len(field_specs) != expected_fields_count:
         sys.exit(
-            f"エラー: フィールド名の数 ({len(field_names)}) が "
+            f"エラー: フィールド名の数 ({len(field_specs)}) が "
             f"フォーマットの要素数 ({expected_fields_count}) と一致しません。"
         )
+
+    # :bcd アノテーションと型コードの整合チェック
+    type_codes = get_format_type_codes(args.format)
+    for i, (name, annotation) in enumerate(field_specs):
+        if annotation == 'bcd' and type_codes[i] not in ('s', 'p'):
+            sys.exit(
+                f"エラー: フィールド '{name}' に ':bcd' が指定されていますが、"
+                f"フォーマットの型コード '{type_codes[i]}' はバイト列 ('s', 'p') ではありません。"
+            )
 
     if args.condition:
         if not is_safe_expression(args.condition, field_names):
             sys.exit("エラー: 抽出条件の式が安全ではありません。")
 
-    return st, field_names
+    return st, field_specs
 
 def main():
     args = parse_args()
-    st, field_names = validate_args(args)
-    
+    st, field_specs = validate_args(args)
+    field_names = [name for name, _ in field_specs]
+
     # 標準入力からバイナリモードで読み込む
     stdin_binary = sys.stdin.buffer
     
@@ -132,13 +226,19 @@ def main():
 
         # フィールド名と値をマッピングし、bytes型はデコードする
         record = {}
-        for name, value in zip(field_names, unpacked_data):
+        for (name, annotation), value in zip(field_specs, unpacked_data):
             if isinstance(value, bytes):
-                try:
-                    # null文字(\x00)が含まれている場合は除去してからデコード
-                    value = value.rstrip(b'\x00').decode(args.encoding)
-                except UnicodeDecodeError as e:
-                    sys.exit(f"エラー: フィールド '{name}' のデコードに失敗しました ({args.encoding}): {e}")
+                if annotation == 'bcd':
+                    try:
+                        value = decode_bcd(value, args.bcd_sign)
+                    except Exception as e:
+                        sys.exit(f"エラー: フィールド '{name}' のBCDデコードに失敗しました: {e}")
+                else:
+                    try:
+                        # null文字(\x00)が含まれている場合は除去してからデコード
+                        value = value.rstrip(b'\x00').decode(args.encoding)
+                    except UnicodeDecodeError as e:
+                        sys.exit(f"エラー: フィールド '{name}' のデコードに失敗しました ({args.encoding}): {e}")
             record[name] = value
 
         # 抽出条件の評価

@@ -19,16 +19,22 @@ cat input.bin | python3 main.py <format> <fields> [options]
 
 - `format` (必須): `struct` モジュールの書式文字列 (例: `>I10sh`)
 - `fields` (必須): アンパックした各フィールド名 (カンマ区切り, 例: `id,name,age`)
+  - `フィールド名:bcd` と指定するとそのフィールドをパック10進数 (BCD) としてデコードします (例: `id,price:bcd,age`)
 
 ### オプション
 
 - `-c`, `--condition`: 抽出条件の Python 式 (例: `age > 20`). 指定したフィールド名を変数として使用可能です。
 - `-o`, `--output`: 出力形式。`dict` (デフォルト), `json`, `binary` から選択します。
 - `-e`, `--encoding`: 文字列 (`bytes`) をデコードする際のエンコーディング。デフォルトは `cp932` です。
+- `--bcd-sign`: BCD フィールドの符号の位置。以下から選択します（デフォルト: `tail`）。
+  - `tail`: 最終バイトの下位ニブルが符号 (COBOL/汎用機方式)
+  - `head`: 先頭バイトの上位ニブルが符号
+  - `none`: 符号なし（全ニブルが数字）
 
 ### 実行例
 
 テスト用のダミーデータは `create_dummy.py` で生成できます。
+`--mode normal` (デフォルト) は `>I10sh` (id, name, age)、`--mode bcd` は `>I3sh` (id, price:bcd, age) のデータを生成します。
 
 **1. 基本的な使い方 (dict 形式で出力)**
 ```bash
@@ -43,6 +49,16 @@ python3 create_dummy.py | python3 main.py ">I10sh" "id,name,age" -c "age > 20" -
 **3. 抽出条件に合致するレコードをバイナリのまま出力**
 ```bash
 python3 create_dummy.py | python3 main.py ">I10sh" "id,name,age" -c "name == '太郎'" -o binary > output.bin
+```
+
+**4. BCD フィールドを含むレコードの出力**
+```bash
+python3 create_dummy.py --mode bcd | python3 main.py ">I3sh" "id,price:bcd,age"
+```
+
+**5. BCD フィールドに対する抽出条件（負数も指定可能）**
+```bash
+python3 create_dummy.py --mode bcd | python3 main.py ">I3sh" "id,price:bcd,age" -c "price > -1000"
 ```
 
 ## テストの実行
