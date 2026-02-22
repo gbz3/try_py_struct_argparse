@@ -1,0 +1,26 @@
+version: 2
+updates:
+  # 1. Python ライブラリの更新設定
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      # CLIなら週1回程度で十分。土曜の朝に確認する設定です
+      interval: "weekly"
+      day: "saturday"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 5
+    # 開発環境（pytest, black, flake8など）の更新はノイズになりやすいため
+    # セキュリティリスクが低いものは月次にするか、重要度で分けると楽です
+    labels:
+      - "dependencies"
+      - "python"
+
+  # 2. GitHub Actions 自身の更新設定
+  # CI/CD (Build, Test, Deploy) で使っている Action を最新に保ちます
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    labels:
+      - "github-actions"
+      - "chore"
