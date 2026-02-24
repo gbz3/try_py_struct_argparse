@@ -3,7 +3,7 @@ import struct
 from unittest.mock import patch
 import pytest
 
-from main import is_safe_expression, validate_args, parse_args, main, decode_bcd, parse_field_specs, get_format_type_codes
+from main import is_safe_expression, validate_args, parse_args, main, decode_bcd, decode_zone, parse_field_specs, get_format_type_codes
 
 def test_is_safe_expression():
     allowed = ["id", "name", "age", "price"]
@@ -171,3 +171,76 @@ def test_main_e2e_binary():
         main()
         
     assert stdout_mock.buffer.getvalue() == data2
+
+# --- decode_zone ---
+
+def test_decode_zone_tail_positive():
+    # 0xF1 0xF2 0xF3 0xC4 -> +1234 (tail, sign=C=正)
+    assert decode_zone(b'\xF1\xF2\xF3\xC4', 'tail') == 1234
+
+def test_decode_zone_tail_negative():
+    # 0xF1 0xF2 0xF3 0xD4 -> -1234 (tail, sign=D=負)
+    assert decode_zone(b'\xF1\xF2\xF3\xD4', 'tail') == -1234
+
+def test_decode_zone_tail_unsigned():
+    # 0xF1 0xF2 0xF3 0xF4 -> +1234 (tail, sign=F=符号なし→正)
+    assert decode_zone(b'\xF1\xF2\xF3\xF4', 'tail') == 1234
+
+def test_decode_zone_head_positive():
+    # 0xC1 0xF2 0xF3 0xF4 -> +1234 (head, sign=C=正)
+    assert decode_zone(b'\xC1\xF2\xF3\xF4', 'head') == 1234
+
+def test_decode_zone_head_negative():
+    # 0xD0 0xF5 0xF6 0xF7 -> -567 (head, sign=D=負)
+    assert decode_zone(b'\xD0\xF5\xF6\xF7', 'head') == -567
+
+def test_decode_zone_none():
+    # 0xF1 0xF2 0xF3 0xF4 -> 1234 (符号なし)
+    assert decode_zone(b'\xF1\xF2\xF3\xF4', 'none') == 1234
+
+# --- :zone on non-bytes field ---
+
+def test_validate_args_zone_on_non_bytes_field():
+    # h (short int) に :zone を付けた場合はエラーになるべき
+    with patch("sys.argv", ["main.py", ">I4sh", "id,amount:zone,age:zone"]):
+        args = parse_args()
+        with pytest.raises(SystemExit):
+            validate_args(args)
+
+# --- E2E with Zone decimal ---
+
+def test_main_e2e_zone_dict():
+    # フォーマット: >I4s (ID: 4bytes unsigned int, amount: 4bytes Zone decimal)
+    fmt = ">I4s"
+    # +1234: 0xF1 0xF2 0xF3 0xC4 (tail符号, sign=C=正)
+    zone_amount = b'\xF1\xF2\xF3\xC4'
+    data = struct.pack(fmt, 1, zone_amount)
+
+    stdin_mock = MockStdin(data)
+    stdout_mock = io.StringIO()
+
+    with patch("sys.argv", ["main.py", ">I4s", "id,amount:zone", "-o", "dict"]), \
+         patch("sys.stdin", stdin_mock), \
+         patch("sys.stdout", stdout_mock):
+        main()
+
+    output = stdout_mock.getvalue()
+    assert "'amount': 1234" in output
+
+def test_main_e2e_zone_negative_dict():
+    # フォーマット: >I4s (ID: 4bytes unsigned int, amount: 4bytes Zone decimal)
+    fmt = ">I4s"
+    # -5678: 0xF5 0xF6 0xF7 0xD8 (tail符号, sign=D=負)
+    zone_amount = b'\xF5\xF6\xF7\xD8'
+    data = struct.pack(fmt, 2, zone_amount)
+
+    stdin_mock = MockStdin(data)
+    stdout_mock = io.StringIO()
+
+    with patch("sys.argv", ["main.py", ">I4s", "id,amount:zone", "-o", "dict"]), \
+         patch("sys.stdin", stdin_mock), \
+         patch("sys.stdout", stdout_mock):
+        main()
+
+    output = stdout_mock.getvalue()
+    assert "'amount': -5678" in output

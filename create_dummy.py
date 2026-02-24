@@ -46,6 +46,42 @@ def create_normal_data():
     for r in records:
         sys.stdout.buffer.write(struct.pack(fmt, r[0], r[1], r[2]))
 
+def encode_zone(value: int, num_bytes: int, sign_position: str = 'tail') -> bytes:
+    """
+    整数をゾーン10進数にエンコードします。
+    各バイトの下位ニブル = 数字、上位ニブル = ゾーン(0xF) or 符号。
+    sign_position:
+      'tail' : 最終バイトの上位ニブルが符号 (COBOL/EBCDIC デフォルト)
+      'head' : 先頭バイトの上位ニブルが符号
+      'none' : 符号なし (全バイト上位ニブルはゾーン)
+    """
+    sign = 0xD if value < 0 else 0xC
+    zone = 0xF
+    digits = list(str(abs(value)).zfill(num_bytes))
+    result = bytearray()
+    for i, d in enumerate(digits):
+        digit = int(d)
+        if sign_position == 'tail' and i == len(digits) - 1:
+            result.append((sign << 4) | digit)
+        elif sign_position == 'head' and i == 0:
+            result.append((sign << 4) | digit)
+        else:
+            result.append((zone << 4) | digit)
+    return bytes(result)
+
+def create_zone_data():
+    """フォーマット: >I4sh (id, amount:zone, age)  ›amount は4バイトゾーン10進(tail方式)"""
+    fmt = '>I4sh'
+    records = [
+        (1,  1234, 25),
+        (2, -5678, 30),
+        (3,   100, 18),
+        (4,  9999, 40),
+    ]
+    for rec_id, amount, age in records:
+        zone_amount = encode_zone(amount, 4, 'tail')
+        sys.stdout.buffer.write(struct.pack(fmt, rec_id, zone_amount, age))
+
 def create_bcd_data():
     """フォーマット: >I3sh (id, price:bcd, age)  ※price は3バイトBCD(tail方式)"""
     fmt = '>I3sh'
@@ -63,13 +99,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="テスト用ダミーバイナリデータを標準出力に書き出します。")
     parser.add_argument(
         "--mode",
-        choices=["normal", "bcd"],
+        choices=["normal", "bcd", "zone"],
         default="normal",
-        help="出力するデータの種類: normal='>I10sh'(id,name,age), bcd='>I3sh'(id,price:bcd,age) (デフォルト: normal)"
+        help="出力するデータの種類: normal='>I10sh'(id,name,age), bcd='>I3sh'(id,price:bcd,age), zone='>I4sh'(id,amount:zone,age) (デフォルト: normal)"
     )
     args = parser.parse_args()
 
     if args.mode == "bcd":
         create_bcd_data()
+    elif args.mode == "zone":
+        create_zone_data()
     else:
         create_normal_data()

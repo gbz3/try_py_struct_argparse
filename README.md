@@ -20,6 +20,7 @@ cat input.bin | python3 main.py <format> <fields> [options]
 - `format` (必須): `struct` モジュールの書式文字列 (例: `>I10sh`)
 - `fields` (必須): アンパックした各フィールド名 (カンマ区切り, 例: `id,name,age`)
   - `フィールド名:bcd` と指定するとそのフィールドをパック10進数 (BCD) としてデコードします (例: `id,price:bcd,age`)
+  - `フィールド名:zone` と指定するとそのフィールドをゾーン10進数としてデコードします (例: `id,amount:zone,age`)
 
 ### オプション
 
@@ -30,11 +31,20 @@ cat input.bin | python3 main.py <format> <fields> [options]
   - `tail`: 最終バイトの下位ニブルが符号 (COBOL/汎用機方式)
   - `head`: 先頭バイトの上位ニブルが符号
   - `none`: 符号なし（全ニブルが数字）
+- `--zone-sign`: ゾーン10進フィールドの符号の位置。以下から選択します（デフォルト: `tail`）。
+  - `tail`: 最終バイトの上位ニブルが符号 (COBOL/EBCDIC 方式)
+  - `head`: 先頭バイトの上位ニブルが符号
+  - `none`: 符号なし（全バイト上位ニブルはゾーン）
 
 ### 実行例
 
 テスト用のダミーデータは `create_dummy.py` で生成できます。
-`--mode normal` (デフォルト) は `>I10sh` (id, name, age)、`--mode bcd` は `>I3sh` (id, price:bcd, age) のデータを生成します。
+
+| `--mode` | フォーマット | フィールド |
+|---|---|---|
+| `normal` (デフォルト) | `>I10sh` | id, name, age |
+| `bcd` | `>I3sh` | id, price:bcd, age |
+| `zone` | `>I4sh` | id, amount:zone, age |
 
 **1. 基本的な使い方 (dict 形式で出力)**
 ```bash
@@ -59,6 +69,16 @@ python3 create_dummy.py --mode bcd | python3 main.py ">I3sh" "id,price:bcd,age"
 **5. BCD フィールドに対する抽出条件（負数も指定可能）**
 ```bash
 python3 create_dummy.py --mode bcd | python3 main.py ">I3sh" "id,price:bcd,age" -c "price > -1000"
+```
+
+**6. ゾーン10進フィールドを含むレコードの出力**
+```bash
+python3 create_dummy.py --mode zone | python3 main.py ">I4sh" "id,amount:zone,age"
+```
+
+**7. ゾーン10進フィールドに対する抽出条件**
+```bash
+python3 create_dummy.py --mode zone | python3 main.py ">I4sh" "id,amount:zone,age" -c "amount > 0" -o json
 ```
 
 ## テストの実行

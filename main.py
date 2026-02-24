@@ -66,6 +66,32 @@ def decode_bcd(data: bytes, sign_position: str) -> int:
             nibbles.append(byte & 0x0F)
         return int(''.join(str(n) for n in nibbles))
 
+def decode_zone(data: bytes, sign_position: str) -> int:
+    """
+    ゾーン10進数を整数に変換します。
+    各バイトの下位ニブルが数字、上位ニブルがゾーン(0xF) または符号。
+    sign_position:
+      'tail' : 最終バイトの上位ニブルが符号 (COBOL/EBCDIC デフォルト)
+      'head' : 先頭バイトの上位ニブルが符号
+      'none' : 符号なし、全バイト上位ニブルはゾーン
+    符号ニブル: C(0xC)=正, D(0xD)=負, F(0xF)=符号なし(正)
+    """
+    if sign_position == 'tail':
+        sign_nibble = (data[-1] >> 4) & 0x0F
+        sign = -1 if sign_nibble == 0xD else 1
+        digits = [byte & 0x0F for byte in data]
+        value = int(''.join(str(d) for d in digits))
+        return sign * value
+    elif sign_position == 'head':
+        sign_nibble = (data[0] >> 4) & 0x0F
+        sign = -1 if sign_nibble == 0xD else 1
+        digits = [byte & 0x0F for byte in data]
+        value = int(''.join(str(d) for d in digits))
+        return sign * value
+    else:  # 'none'
+        digits = [byte & 0x0F for byte in data]
+        return int(''.join(str(d) for d in digits))
+
 def parse_field_specs(fields_str: str) -> List[Tuple[str, Optional[str]]]:
     """
     フィールド名と型アノテーションをパースします。
@@ -149,6 +175,12 @@ def parse_args() -> argparse.Namespace:
         default="tail",
         help="BCD符号の位置: tail=最終バイト下位ニブル(デフォルト/COBOL), head=先頭バイト上位ニブル, none=符号なし"
     )
+    parser.add_argument(
+        "--zone-sign",
+        choices=["tail", "head", "none"],
+        default="tail",
+        help="ゾーン10進符号の位置: tail=最終バイト上位ニブル(デフォルト/COBOL), head=先頭バイト上位ニブル, none=符号なし"
+    )
     return parser.parse_args()
 
 def validate_args(args: argparse.Namespace) -> Tuple[struct.Struct, List[Tuple[str, Optional[str]]]]:
@@ -179,11 +211,16 @@ def validate_args(args: argparse.Namespace) -> Tuple[struct.Struct, List[Tuple[s
             f"フォーマットの要素数 ({len(type_codes)}) と一致しません。"
         )
 
-    # :bcd アノテーションと型コードの整合チェック
+    # :bcd / :zone アノテーションと型コードの整合チェック
     for i, (name, annotation) in enumerate(field_specs):
         if annotation == 'bcd' and type_codes[i] not in ('s', 'p'):
             sys.exit(
                 f"エラー: フィールド '{name}' に ':bcd' が指定されていますが、"
+                f"フォーマットの型コード '{type_codes[i]}' はバイト列 ('s', 'p') ではありません。"
+            )
+        if annotation == 'zone' and type_codes[i] not in ('s', 'p'):
+            sys.exit(
+                f"エラー: フィールド '{name}' に ':zone' が指定されていますが、"
                 f"フォーマットの型コード '{type_codes[i]}' はバイト列 ('s', 'p') ではありません。"
             )
 
@@ -225,6 +262,11 @@ def main():
                         value = decode_bcd(value, args.bcd_sign)
                     except Exception as e:
                         sys.exit(f"エラー: フィールド '{name}' のBCDデコードに失敗しました: {e}")
+                elif annotation == 'zone':
+                    try:
+                        value = decode_zone(value, args.zone_sign)
+                    except Exception as e:
+                        sys.exit(f"エラー: フィールド '{name}' のゾーン10進デコードに失敗しました: {e}")
                 else:
                     try:
                         # null文字(\x00)が含まれている場合は除去してからデコード
