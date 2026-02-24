@@ -20,7 +20,10 @@ cat input.bin | python3 main.py <format> <fields> [options]
 - `format` (必須): `struct` モジュールの書式文字列 (例: `>I10sh`)
 - `fields` (必須): アンパックした各フィールド名 (カンマ区切り, 例: `id,name,age`)
   - `フィールド名:bcd` と指定するとそのフィールドをパック10進数 (BCD) としてデコードします (例: `id,price:bcd,age`)
+  - `フィールド名:bcd:符号位置` と指定するとフィールド単位で符号位置を上書きできます (例: `id,price:bcd:tail,discount:bcd:head`)
   - `フィールド名:zone` と指定するとそのフィールドをゾーン10進数としてデコードします (例: `id,amount:zone,age`)
+  - `フィールド名:zone:符号位置` と指定するとフィールド単位で符号位置を上書きできます (例: `id,amount:zone:tail`)
+  - 符号位置を省略した場合は `--bcd-sign` / `--zone-sign` のグローバル設定が使用されます
 
 ### オプション
 
@@ -71,7 +74,18 @@ python3 create_dummy.py --mode bcd | python3 main.py ">I3sh" "id,price:bcd,age"
 python3 create_dummy.py --mode bcd | python3 main.py ">I3sh" "id,price:bcd,age" -c "price > -1000"
 ```
 
-**6. ゾーン10進フィールドを含むレコードの出力**
+**5. BCD フィールドに対する抽出条件（負数も指定可能）**
+```bash
+python3 create_dummy.py --mode bcd | python3 main.py ">I3sh" "id,price:bcd,age" -c "price > -1000"
+```
+
+**6. フィールド毎に符号位置を指定（BCD）**
+```bash
+# price は tail 方式、discount は head 方式で個別にデコード
+python3 main.py ">I3s3s" "id,price:bcd:tail,discount:bcd:head" < input.bin
+```
+
+**7. ゾーン10進フィールドを含むレコードの出力**
 ```bash
 python3 create_dummy.py --mode zone | python3 main.py ">I4sh" "id,amount:zone,age"
 ```

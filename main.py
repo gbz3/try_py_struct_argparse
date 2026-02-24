@@ -92,21 +92,23 @@ def decode_zone(data: bytes, sign_position: str) -> int:
         digits = [byte & 0x0F for byte in data]
         return int(''.join(str(d) for d in digits))
 
-def parse_field_specs(fields_str: str) -> List[Tuple[str, Optional[str]]]:
+def parse_field_specs(fields_str: str) -> List[Tuple[str, Optional[str], Optional[str]]]:
     """
-    フィールド名と型アノテーションをパースします。
-    例: 'id,price:bcd,name' -> [('id', None), ('price', 'bcd'), ('name', None)]
+    フィールド名、型アノテーション、符号位置オーバーライドをパースします。
+    例:
+      'id,price:bcd,name'           -> [('id', None, None), ('price', 'bcd', None), ('name', None, None)]
+      'id,price:bcd:tail,amt:zone:head' -> [('id', None, None), ('price', 'bcd', 'tail'), ('amt', 'zone', 'head')]
     """
     specs = []
     for f in fields_str.split(','):
         f = f.strip()
         if not f:
             continue
-        if ':' in f:
-            name, annotation = f.split(':', 1)
-            specs.append((name.strip(), annotation.strip()))
-        else:
-            specs.append((f, None))
+        parts = f.split(':')
+        name = parts[0].strip()
+        annotation = parts[1].strip() if len(parts) >= 2 else None
+        sign_override = parts[2].strip() if len(parts) >= 3 else None
+        specs.append((name, annotation, sign_override))
     return specs
 
 def is_safe_expression(expr: str, allowed_names: List[str]) -> bool:
@@ -183,7 +185,9 @@ def parse_args() -> argparse.Namespace:
     )
     return parser.parse_args()
 
-def validate_args(args: argparse.Namespace) -> Tuple[struct.Struct, List[Tuple[str, Optional[str]]]]:
+_VALID_SIGN_POSITIONS = {'tail', 'head', 'none'}
+
+def validate_args(args: argparse.Namespace) -> Tuple[struct.Struct, List[Tuple[str, Optional[str], Optional[str]]]]:
     # エンコーディングのチェック
     try:
         codecs.lookup(args.encoding)
@@ -200,7 +204,7 @@ def validate_args(args: argparse.Namespace) -> Tuple[struct.Struct, List[Tuple[s
     field_specs = parse_field_specs(args.fields)
     if not field_specs:
         sys.exit("エラー: フィールド名が指定されていません。")
-    field_names = [name for name, _ in field_specs]
+    field_names = [name for name, *_ in field_specs]
 
     # フォーマットの型コードリストを取得（パディング 'x' を除く）
     # get_format_type_codes で要素数も確認できるため、ダミーアンパックは不要
@@ -211,8 +215,8 @@ def validate_args(args: argparse.Namespace) -> Tuple[struct.Struct, List[Tuple[s
             f"フォーマットの要素数 ({len(type_codes)}) と一致しません。"
         )
 
-    # :bcd / :zone アノテーションと型コードの整合チェック
-    for i, (name, annotation) in enumerate(field_specs):
+    # :bcd / :zone アノテーションと型コードの整合チェック、sign_override の値チェック
+    for i, (name, annotation, sign_override) in enumerate(field_specs):
         if annotation == 'bcd' and type_codes[i] not in ('s', 'p'):
             sys.exit(
                 f"エラー: フィールド '{name}' に ':bcd' が指定されていますが、"
@@ -222,6 +226,11 @@ def validate_args(args: argparse.Namespace) -> Tuple[struct.Struct, List[Tuple[s
             sys.exit(
                 f"エラー: フィールド '{name}' に ':zone' が指定されていますが、"
                 f"フォーマットの型コード '{type_codes[i]}' はバイト列 ('s', 'p') ではありません。"
+            )
+        if sign_override is not None and sign_override not in _VALID_SIGN_POSITIONS:
+            sys.exit(
+                f"エラー: フィールド '{name}' の符号位置指定 '{sign_override}' は無効です。"
+                f" 有効な値: {sorted(_VALID_SIGN_POSITIONS)}"
             )
 
     if args.condition:
@@ -255,16 +264,18 @@ def main():
 
         # フィールド名と値をマッピングし、bytes型はデコードする
         record = {}
-        for (name, annotation), value in zip(field_specs, unpacked_data):
+        for (name, annotation, sign_override), value in zip(field_specs, unpacked_data):
             if isinstance(value, bytes):
                 if annotation == 'bcd':
+                    sign = sign_override if sign_override else args.bcd_sign
                     try:
-                        value = decode_bcd(value, args.bcd_sign)
+                        value = decode_bcd(value, sign)
                     except Exception as e:
                         sys.exit(f"エラー: フィールド '{name}' のBCDデコードに失敗しました: {e}")
                 elif annotation == 'zone':
+                    sign = sign_override if sign_override else args.zone_sign
                     try:
-                        value = decode_zone(value, args.zone_sign)
+                        value = decode_zone(value, sign)
                     except Exception as e:
                         sys.exit(f"エラー: フィールド '{name}' のゾーン10進デコードに失敗しました: {e}")
                 else:

@@ -25,7 +25,7 @@ def test_validate_args_success():
         args = parse_args()
         st, field_specs = validate_args(args)
         assert st.format == ">I10sh"
-        assert field_specs == [("id", None), ("name", None), ("age", None)]
+        assert field_specs == [("id", None, None), ("name", None, None), ("age", None, None)]
 
 def test_validate_args_mismatch():
     with patch("sys.argv", ["main.py", ">I10sh", "id,name"]):
@@ -63,10 +63,26 @@ def test_validate_args_bcd_on_non_bytes_field():
 # --- parse_field_specs ---
 
 def test_parse_field_specs_no_annotation():
-    assert parse_field_specs("id,name,age") == [("id", None), ("name", None), ("age", None)]
+    assert parse_field_specs("id,name,age") == [("id", None, None), ("name", None, None), ("age", None, None)]
 
 def test_parse_field_specs_with_bcd():
-    assert parse_field_specs("id,price:bcd,name") == [("id", None), ("price", "bcd"), ("name", None)]
+    assert parse_field_specs("id,price:bcd,name") == [("id", None, None), ("price", "bcd", None), ("name", None, None)]
+
+def test_parse_field_specs_with_sign_override():
+    assert parse_field_specs("id,price:bcd:tail,amt:zone:head") == [
+        ("id", None, None),
+        ("price", "bcd", "tail"),
+        ("amt", "zone", "head"),
+    ]
+
+# --- invalid sign_override ---
+
+def test_validate_args_invalid_sign_override():
+    # 不正な符号位置指定はエラーになるべき
+    with patch("sys.argv", ["main.py", ">I3s", "id,price:bcd:invalid"]):
+        args = parse_args()
+        with pytest.raises(SystemExit):
+            validate_args(args)
 
 # --- decode_bcd ---
 
@@ -113,6 +129,27 @@ def test_main_e2e_bcd_dict():
     
     output = stdout_mock.getvalue()
     assert "'price': 1234" in output
+
+def test_main_e2e_bcd_per_field_sign():
+    # フィールド毎の符号位置指定: price は :bcd:tail、discount は :bcd:head
+    # price: 0x01 0x23 0x4C -> +1234 (tail)
+    # discount: 0xD0 0x05 0x67 -> -567 (head)
+    fmt = ">I3s3s"
+    price_bcd    = b'\x01\x23\x4C'
+    discount_bcd = b'\xD0\x05\x67'
+    data = struct.pack(fmt, 1, price_bcd, discount_bcd)
+
+    stdin_mock = MockStdin(data)
+    stdout_mock = io.StringIO()
+
+    with patch("sys.argv", ["main.py", ">I3s3s", "id,price:bcd:tail,discount:bcd:head", "-o", "dict"]), \
+         patch("sys.stdin", stdin_mock), \
+         patch("sys.stdout", stdout_mock):
+        main()
+
+    output = stdout_mock.getvalue()
+    assert "'price': 1234" in output
+    assert "'discount': -567" in output
 
 
 class MockStdin:
