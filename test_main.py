@@ -319,3 +319,78 @@ def test_main_e2e_zone_negative_dict():
 
     output = stdout_mock.getvalue()
     assert "'amount': -5678" in output
+
+# --- --record-num ---
+
+def test_main_e2e_record_num_dict():
+    fmt = ">I10sh"
+    data = struct.pack(fmt, 1, "Alice".encode("cp932"), 25)
+    data += struct.pack(fmt, 2, "Bob".encode("cp932"), 30)
+
+    stdin_mock = MockStdin(data)
+    stdout_mock = io.StringIO()
+
+    with patch("sys.argv", ["main.py", ">I10sh", "id,name,age", "--record-num"]), \
+         patch("sys.stdin", stdin_mock), \
+         patch("sys.stdout", stdout_mock):
+        main()
+
+    lines = [l for l in stdout_mock.getvalue().strip().split("\n") if l]
+    assert len(lines) == 2
+    assert "'_rec_no': 1" in lines[0]
+    assert "'_rec_no': 2" in lines[1]
+    # _rec_no が先頭キーであることを確認
+    assert lines[0].startswith("{'_rec_no': 1,")
+
+def test_main_e2e_record_num_condition():
+    # --record-num なしでも _rec_no を condition 内で参照できることの確認
+    fmt = ">I10sh"
+    data = struct.pack(fmt, 1, "Alice".encode("cp932"), 25)
+    data += struct.pack(fmt, 2, "Bob".encode("cp932"), 30)
+    data += struct.pack(fmt, 3, "Carol".encode("cp932"), 35)
+
+    stdin_mock = MockStdin(data)
+    stdout_mock = io.StringIO()
+
+    with patch("sys.argv", ["main.py", ">I10sh", "id,name,age", "-c", "_rec_no == 2", "-o", "json"]), \
+         patch("sys.stdin", stdin_mock), \
+         patch("sys.stdout", stdout_mock):
+        main()
+
+    lines = [l for l in stdout_mock.getvalue().strip().split("\n") if l]
+    assert len(lines) == 1
+    assert '"name": "Bob"' in lines[0]
+
+def test_main_e2e_record_num_skipped_count():
+    # --condition でスキップされたレコードも入力番号にカウントされることの確認
+    fmt = ">I10sh"
+    data = struct.pack(fmt, 1, "Alice".encode("cp932"), 25)  # age <= 25: スキップ
+    data += struct.pack(fmt, 2, "Bob".encode("cp932"), 30)   # age > 25: 出力
+
+    stdin_mock = MockStdin(data)
+    stdout_mock = io.StringIO()
+
+    with patch("sys.argv", ["main.py", ">I10sh", "id,name,age", "-c", "age > 25", "--record-num"]), \
+         patch("sys.stdin", stdin_mock), \
+         patch("sys.stdout", stdout_mock):
+        main()
+
+    lines = [l for l in stdout_mock.getvalue().strip().split("\n") if l]
+    assert len(lines) == 1
+    # Bob は入力2番目なので _rec_no == 2
+    assert "'_rec_no': 2" in lines[0]
+
+def test_main_e2e_record_num_not_in_binary():
+    # binary 出力時は --record-num を指定してもバイナリに影響しない
+    fmt = ">I10sh"
+    data1 = struct.pack(fmt, 1, "Alice".encode("cp932"), 25)
+
+    stdin_mock = MockStdin(data1)
+    stdout_mock = MockStdout()
+
+    with patch("sys.argv", ["main.py", ">I10sh", "id,name,age", "-o", "binary", "--record-num"]), \
+         patch("sys.stdin", stdin_mock), \
+         patch("sys.stdout", stdout_mock):
+        main()
+
+    assert stdout_mock.buffer.getvalue() == data1

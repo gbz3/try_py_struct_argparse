@@ -39,6 +39,7 @@ cat input.bin | python3 main.py <format> <fields> [options]
   - `head`: 先頭バイトの上位ニブルが符号
   - `none`: 符号なし（全バイト上位ニブルはゾーン）
 - `-n`, `--max-records`: 出力レコードの最大件数 (`N`)。N 件に達した時点で処理を中止します。省略時は無制限です。`--condition` と組み合わせた場合、条件を通過した件数が上限の基準になります。
+- `--record-num`: 出力レコードの先頭に入力レコード番号フィールド `_rec_no`（1始まり）を付与します。`-o binary` の場合は無効です。なお、`--condition` 内では本フラグの指定有無に関わらず `_rec_no` を常に参照できます。`--condition` でスキップされたレコードも番号にカウントされるため、`_rec_no` は常に入力ファイル内の位置を示します。
 
 ### 実行例
 
@@ -104,6 +105,22 @@ python3 create_dummy.py | python3 main.py ">I10sh" "id,name,age" -n 2
 **9. 抽出条件と最大件数の組み合わせ（条件通過後 1 件で終了）**
 ```bash
 python3 create_dummy.py | python3 main.py ">I10sh" "id,name,age" -c "age > 20" -n 1
+```
+
+**10. 入力レコード番号を先頭フィールドに付与して出力**
+```bash
+python3 create_dummy.py | python3 main.py ">I10sh" "id,name,age" --record-num
+```
+
+**11. 入力レコード番号でフィルタリング（2番目のレコードのみ出力）**
+```bash
+python3 create_dummy.py | python3 main.py ">I10sh" "id,name,age" -c "_rec_no == 2" -o json
+```
+
+**12. 入力レコード番号フィルタリングに最大件数制限を組み合わせ**
+```bash
+# 3番目以降のレコードを最大2件出力
+python3 create_dummy.py | python3 main.py ">I10sh" "id,name,age" -c "_rec_no >= 3" -n 2 --record-num
 ```
 
 ## テストの実行

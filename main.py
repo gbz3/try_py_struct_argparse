@@ -190,6 +190,13 @@ def parse_args() -> argparse.Namespace:
         metavar="N",
         help="出力レコードの最大件数。N件に達した時点で処理を中止します。(デフォルト: 無制限)"
     )
+    parser.add_argument(
+        "--record-num",
+        action="store_true",
+        default=False,
+        help="出力レコードの先頭に入力レコード番号 '_rec_no'（1始まり）を付与します。-o binary では無効。"
+             " --condition 内では --record-num 指定の有無に関わらず '_rec_no' を常に参照できます。"
+    )
     return parser.parse_args()
 
 _VALID_SIGN_POSITIONS = {'tail', 'head', 'none'}
@@ -241,7 +248,7 @@ def validate_args(args: argparse.Namespace) -> Tuple[struct.Struct, List[Tuple[s
             )
 
     if args.condition:
-        if not is_safe_expression(args.condition, field_names):
+        if not is_safe_expression(args.condition, field_names + ['_rec_no']):
             sys.exit("エラー: 抽出条件の式が安全ではありません。")
 
     return st, field_specs
@@ -257,10 +264,13 @@ def main():
     compiled_condition = compile(args.condition, '<string>', 'eval') if args.condition else None
 
     output_count = 0
+    input_rec_no = 0
     while True:
         chunk = stdin_binary.read(st.size)
         if not chunk:
             break # EOF
+
+        input_rec_no += 1
         
         if len(chunk) != st.size:
             sys.exit(f"エラー: 読み込んだデータサイズ ({len(chunk)} bytes) がフォーマットのサイズ ({st.size} bytes) と一致しません。")
@@ -294,11 +304,11 @@ def main():
                         sys.exit(f"エラー: フィールド '{name}' のデコードに失敗しました ({args.encoding}): {e}")
             record[name] = value
 
-        # 抽出条件の評価
+        # 抽出条件の評価 (_rec_no を常に参照可能にする)
         if compiled_condition:
             try:
-                # recordのキー(フィールド名)をローカル変数としてevalに渡す
-                if not eval(compiled_condition, {"__builtins__": {}}, record):
+                eval_locals = {**record, '_rec_no': input_rec_no}
+                if not eval(compiled_condition, {"__builtins__": {}}, eval_locals):
                     continue # 条件に合致しない場合はスキップ
             except Exception as e:
                 sys.exit(f"エラー: 抽出条件の評価中に例外が発生しました: {e}")
@@ -306,10 +316,13 @@ def main():
         # 出力処理
         if args.output == "binary":
             sys.stdout.buffer.write(chunk)
-        elif args.output == "json":
-            print(json.dumps(record, ensure_ascii=False))
-        else: # dict
-            print(record)
+        else:
+            if args.record_num:
+                record = {'_rec_no': input_rec_no, **record}
+            if args.output == "json":
+                print(json.dumps(record, ensure_ascii=False))
+            else: # dict
+                print(record)
 
         output_count += 1
         if args.max_records is not None and output_count >= args.max_records:
