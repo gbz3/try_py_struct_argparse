@@ -183,6 +183,13 @@ def parse_args() -> argparse.Namespace:
         default="tail",
         help="ゾーン10進符号の位置: tail=最終バイト上位ニブル(デフォルト/COBOL), head=先頭バイト上位ニブル, none=符号なし"
     )
+    parser.add_argument(
+        "-n", "--max-records",
+        type=int,
+        default=None,
+        metavar="N",
+        help="出力レコードの最大件数。N件に達した時点で処理を中止します。(デフォルト: 無制限)"
+    )
     return parser.parse_args()
 
 _VALID_SIGN_POSITIONS = {'tail', 'head', 'none'}
@@ -249,6 +256,7 @@ def main():
     # 条件式が指定されている場合はコンパイルしておく
     compiled_condition = compile(args.condition, '<string>', 'eval') if args.condition else None
 
+    output_count = 0
     while True:
         chunk = stdin_binary.read(st.size)
         if not chunk:
@@ -302,6 +310,10 @@ def main():
             print(json.dumps(record, ensure_ascii=False))
         else: # dict
             print(record)
+
+        output_count += 1
+        if args.max_records is not None and output_count >= args.max_records:
+            break
 
 if __name__ == "__main__":
     main()

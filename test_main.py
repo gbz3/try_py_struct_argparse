@@ -194,6 +194,44 @@ class MockStdout:
     def __init__(self):
         self.buffer = io.BytesIO()
 
+def test_main_e2e_max_records():
+    fmt = ">I10sh"
+    data = struct.pack(fmt, 1, "Alice".encode("cp932"), 25)
+    data += struct.pack(fmt, 2, "Bob".encode("cp932"), 30)
+    data += struct.pack(fmt, 3, "Carol".encode("cp932"), 35)
+
+    stdin_mock = MockStdin(data)
+    stdout_mock = io.StringIO()
+
+    with patch("sys.argv", ["main.py", ">I10sh", "id,name,age", "-n", "2"]), \
+         patch("sys.stdin", stdin_mock), \
+         patch("sys.stdout", stdout_mock):
+        main()
+
+    lines = [l for l in stdout_mock.getvalue().strip().split("\n") if l]
+    assert len(lines) == 2
+    assert "'name': 'Alice'" in lines[0]
+    assert "'name': 'Bob'" in lines[1]
+
+def test_main_e2e_max_records_with_condition():
+    # --condition でフィルタ後の出力件数が -n の上限に従うことを確認
+    fmt = ">I10sh"
+    data = struct.pack(fmt, 1, "Alice".encode("cp932"), 25)
+    data += struct.pack(fmt, 2, "Bob".encode("cp932"), 30)
+    data += struct.pack(fmt, 3, "Carol".encode("cp932"), 35)
+
+    stdin_mock = MockStdin(data)
+    stdout_mock = io.StringIO()
+
+    with patch("sys.argv", ["main.py", ">I10sh", "id,name,age", "-c", "age > 25", "-n", "1"]), \
+         patch("sys.stdin", stdin_mock), \
+         patch("sys.stdout", stdout_mock):
+        main()
+
+    lines = [l for l in stdout_mock.getvalue().strip().split("\n") if l]
+    assert len(lines) == 1
+    assert "'name': 'Bob'" in lines[0]
+
 def test_main_e2e_binary():
     fmt = ">I10sh"
     data1 = struct.pack(fmt, 1, "Alice".encode("cp932"), 25)

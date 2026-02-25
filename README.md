@@ -38,6 +38,7 @@ cat input.bin | python3 main.py <format> <fields> [options]
   - `tail`: 最終バイトの上位ニブルが符号 (COBOL/EBCDIC 方式)
   - `head`: 先頭バイトの上位ニブルが符号
   - `none`: 符号なし（全バイト上位ニブルはゾーン）
+- `-n`, `--max-records`: 出力レコードの最大件数 (`N`)。N 件に達した時点で処理を中止します。省略時は無制限です。`--condition` と組み合わせた場合、条件を通過した件数が上限の基準になります。
 
 ### 実行例
 
@@ -93,6 +94,16 @@ python3 create_dummy.py --mode zone | python3 main.py ">I4sh" "id,amount:zone,ag
 **7. ゾーン10進フィールドに対する抽出条件**
 ```bash
 python3 create_dummy.py --mode zone | python3 main.py ">I4sh" "id,amount:zone,age" -c "amount > 0" -o json
+```
+
+**8. 出力レコード件数を最大 2 件に制限**
+```bash
+python3 create_dummy.py | python3 main.py ">I10sh" "id,name,age" -n 2
+```
+
+**9. 抽出条件と最大件数の組み合わせ（条件通過後 1 件で終了）**
+```bash
+python3 create_dummy.py | python3 main.py ">I10sh" "id,name,age" -c "age > 20" -n 1
 ```
 
 ## テストの実行
