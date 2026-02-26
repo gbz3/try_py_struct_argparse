@@ -2,10 +2,16 @@ import argparse
 import ast
 import codecs
 import json
+import multiprocessing
+import os
 import re
 import struct
 import sys
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+# ワーカー1プロセスあたりが処理するレコード数。大きいほどI/Oが効率的になるが
+# メモリ使用量が増える。チューニングの目安として変更可能。
+BATCH_SIZE = 256
 
 def get_format_type_codes(fmt: str) -> List[str]:
     """
@@ -39,32 +45,30 @@ def decode_bcd(data: bytes, sign_position: str) -> int:
         sign_nibble = data[-1] & 0x0F
         sign = -1 if sign_nibble == 0xD else 1
         # 全バイトの上位ニブル + 最終バイト以外の下位ニブルが数字
-        nibbles = []
+        value = 0
         for i, byte in enumerate(data):
-            nibbles.append((byte >> 4) & 0x0F)
+            value = value * 10 + ((byte >> 4) & 0x0F)
             if i < len(data) - 1:
-                nibbles.append(byte & 0x0F)
-        value = int(''.join(str(n) for n in nibbles))
+                value = value * 10 + (byte & 0x0F)
         return sign * value
     elif sign_position == 'head':
         sign_nibble = (data[0] >> 4) & 0x0F
         sign = -1 if sign_nibble == 0xD else 1
         # 先頭バイトの下位ニブル以降が数字
-        nibbles = []
+        value = 0
         for i, byte in enumerate(data):
             if i == 0:
-                nibbles.append(byte & 0x0F)
+                value = byte & 0x0F
             else:
-                nibbles.append((byte >> 4) & 0x0F)
-                nibbles.append(byte & 0x0F)
-        value = int(''.join(str(n) for n in nibbles))
+                value = value * 10 + ((byte >> 4) & 0x0F)
+                value = value * 10 + (byte & 0x0F)
         return sign * value
     else:  # 'none'
-        nibbles = []
+        value = 0
         for byte in data:
-            nibbles.append((byte >> 4) & 0x0F)
-            nibbles.append(byte & 0x0F)
-        return int(''.join(str(n) for n in nibbles))
+            value = value * 10 + ((byte >> 4) & 0x0F)
+            value = value * 10 + (byte & 0x0F)
+        return value
 
 def decode_zone(data: bytes, sign_position: str) -> int:
     """
@@ -79,18 +83,15 @@ def decode_zone(data: bytes, sign_position: str) -> int:
     if sign_position == 'tail':
         sign_nibble = (data[-1] >> 4) & 0x0F
         sign = -1 if sign_nibble == 0xD else 1
-        digits = [byte & 0x0F for byte in data]
-        value = int(''.join(str(d) for d in digits))
-        return sign * value
     elif sign_position == 'head':
         sign_nibble = (data[0] >> 4) & 0x0F
         sign = -1 if sign_nibble == 0xD else 1
-        digits = [byte & 0x0F for byte in data]
-        value = int(''.join(str(d) for d in digits))
-        return sign * value
     else:  # 'none'
-        digits = [byte & 0x0F for byte in data]
-        return int(''.join(str(d) for d in digits))
+        sign = 1
+    value = 0
+    for byte in data:
+        value = value * 10 + (byte & 0x0F)
+    return sign * value
 
 def parse_field_specs(fields_str: str) -> List[Tuple[str, Optional[str], Optional[str]]]:
     """
@@ -143,6 +144,106 @@ def is_safe_expression(expr: str, allowed_names: List[str]) -> bool:
             print(f"エラー: 許可されていない構文 '{type(node).__name__}' が使用されています。", file=sys.stderr)
             return False
     return True
+
+# ---------------------------------------------------------------------------
+# マルチプロセス ワーカー
+# ---------------------------------------------------------------------------
+
+# ワーカープロセスが共有するモジュールレベルのグローバル変数
+_worker_st: Optional[struct.Struct] = None
+_worker_field_specs: Optional[List[Tuple[str, Optional[str], Optional[str]]]] = None
+_worker_encoding: str = 'cp932'
+_worker_bcd_sign: str = 'tail'
+_worker_zone_sign: str = 'tail'
+_worker_compiled_cond: Any = None
+
+
+def _worker_init(
+    fmt: str,
+    field_specs: List[Tuple[str, Optional[str], Optional[str]]],
+    encoding: str,
+    bcd_sign: str,
+    zone_sign: str,
+    condition_str: Optional[str],
+) -> None:
+    """各ワーカープロセスの起動時に一度だけ呼ばれる初期化関数。"""
+    global _worker_st, _worker_field_specs, _worker_encoding
+    global _worker_bcd_sign, _worker_zone_sign, _worker_compiled_cond
+    _worker_st = struct.Struct(fmt)
+    _worker_field_specs = field_specs
+    _worker_encoding = encoding
+    _worker_bcd_sign = bcd_sign
+    _worker_zone_sign = zone_sign
+    _worker_compiled_cond = compile(condition_str, '<string>', 'eval') if condition_str else None
+
+
+def _process_batch(
+    args_tuple: Tuple[bytes, int],
+) -> List[Tuple[int, bytes, Optional[Dict[str, Any]]]]:
+    """バイト列のバッチを受け取り、レコードごとにデコード・条件評価を行う。
+
+    Returns:
+        list of (rec_no, raw_chunk, record)
+        record が None の場合は条件に合致しなかったことを示す。
+    """
+    batch_bytes, start_rec_no = args_tuple
+    rec_size = _worker_st.size  # type: ignore[union-attr]
+    n_records = len(batch_bytes) // rec_size
+    results: List[Tuple[int, bytes, Optional[Dict[str, Any]]]] = []
+
+    for i in range(n_records):
+        rec_no = start_rec_no + i
+        chunk = batch_bytes[i * rec_size:(i + 1) * rec_size]
+
+        unpacked_data = _worker_st.unpack(chunk)  # type: ignore[union-attr]
+
+        record: Dict[str, Any] = {}
+        for (name, annotation, sign_override), value in zip(_worker_field_specs, unpacked_data):  # type: ignore[arg-type]
+            if isinstance(value, bytes):
+                if annotation == 'bcd':
+                    sign = sign_override if sign_override else _worker_bcd_sign
+                    value = decode_bcd(value, sign)
+                elif annotation == 'zone':
+                    sign = sign_override if sign_override else _worker_zone_sign
+                    value = decode_zone(value, sign)
+                else:
+                    value = value.rstrip(b'\x00').decode(_worker_encoding)
+            record[name] = value
+
+        if _worker_compiled_cond is not None:
+            eval_locals = {**record, '_rec_no': rec_no}
+            if not eval(_worker_compiled_cond, {"__builtins__": {}}, eval_locals):
+                results.append((rec_no, chunk, None))
+                continue
+
+        results.append((rec_no, chunk, record))
+
+    return results
+
+
+def _batch_generator(
+    stdin_binary,
+    rec_size: int,
+):
+    """stdin をバッチ単位で読み込んで (batch_bytes, start_rec_no) を yield する。"""
+    rec_no = 1
+    while True:
+        raw = stdin_binary.read(rec_size * BATCH_SIZE)
+        if not raw:
+            break
+        n = len(raw) // rec_size
+        remainder = len(raw) % rec_size
+        if remainder:
+            sys.exit(
+                f"エラー: 読み込んだデータサイズ ({len(raw)} bytes) が "
+                f"レコードサイズ ({rec_size} bytes) の倍数ではありません。"
+            )
+        if n > 0:
+            yield (raw, rec_no)
+            rec_no += n
+
+
+# ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -257,76 +358,73 @@ def main():
     args = parse_args()
     st, field_specs = validate_args(args)
 
-    # 標準入力からバイナリモードで読み込む
     stdin_binary = sys.stdin.buffer
-    
-    # 条件式が指定されている場合はコンパイルしておく
-    compiled_condition = compile(args.condition, '<string>', 'eval') if args.condition else None
+    n_workers = os.cpu_count() or 1
+
+    initargs = (
+        args.format,
+        field_specs,
+        args.encoding,
+        args.bcd_sign,
+        args.zone_sign,
+        args.condition,
+    )
 
     output_count = 0
-    input_rec_no = 0
-    while True:
-        chunk = stdin_binary.read(st.size)
-        if not chunk:
-            break # EOF
+    done = False
 
-        input_rec_no += 1
-        
-        if len(chunk) != st.size:
-            sys.exit(f"エラー: 読み込んだデータサイズ ({len(chunk)} bytes) がフォーマットのサイズ ({st.size} bytes) と一致しません。")
-
+    with multiprocessing.Pool(
+        processes=n_workers,
+        initializer=_worker_init,
+        initargs=initargs,
+    ) as pool:
         try:
-            unpacked_data = st.unpack(chunk)
-        except struct.error as e:
-            sys.exit(f"エラー: データのアンパックに失敗しました: {e}")
-
-        # フィールド名と値をマッピングし、bytes型はデコードする
-        record = {}
-        for (name, annotation, sign_override), value in zip(field_specs, unpacked_data):
-            if isinstance(value, bytes):
-                if annotation == 'bcd':
-                    sign = sign_override if sign_override else args.bcd_sign
-                    try:
-                        value = decode_bcd(value, sign)
-                    except Exception as e:
-                        sys.exit(f"エラー: フィールド '{name}' のBCDデコードに失敗しました: {e}")
-                elif annotation == 'zone':
-                    sign = sign_override if sign_override else args.zone_sign
-                    try:
-                        value = decode_zone(value, sign)
-                    except Exception as e:
-                        sys.exit(f"エラー: フィールド '{name}' のゾーン10進デコードに失敗しました: {e}")
+            for batch_results in pool.imap(
+                _process_batch,
+                _batch_generator(stdin_binary, st.size),
+            ):
+                # バッチ内の出力をまとめて書き込む（システムコール削減）
+                if args.output == "binary":
+                    chunks = [
+                        chunk
+                        for _, chunk, record in batch_results
+                        if record is not None
+                    ]
+                    # --max-records を考慮して先頭から必要分だけ抽出
+                    if args.max_records is not None:
+                        remaining = args.max_records - output_count
+                        chunks = chunks[:remaining]
+                    if chunks:
+                        sys.stdout.buffer.write(b''.join(chunks))
+                        output_count += len(chunks)
                 else:
-                    try:
-                        # null文字(\x00)が含まれている場合は除去してからデコード
-                        value = value.rstrip(b'\x00').decode(args.encoding)
-                    except UnicodeDecodeError as e:
-                        sys.exit(f"エラー: フィールド '{name}' のデコードに失敗しました ({args.encoding}): {e}")
-            record[name] = value
+                    lines = []
+                    for rec_no, chunk, record in batch_results:
+                        if record is None:
+                            continue
+                        if args.record_num:
+                            record = {'_rec_no': rec_no, **record}
+                        if args.output == "json":
+                            lines.append(json.dumps(record, ensure_ascii=False))
+                        else:  # dict
+                            lines.append(str(record))
+                        output_count += 1
+                        if args.max_records is not None and output_count >= args.max_records:
+                            done = True
+                            break
+                    if lines:
+                        sys.stdout.write('\n'.join(lines) + '\n')
 
-        # 抽出条件の評価 (_rec_no を常に参照可能にする)
-        if compiled_condition:
-            try:
-                eval_locals = {**record, '_rec_no': input_rec_no}
-                if not eval(compiled_condition, {"__builtins__": {}}, eval_locals):
-                    continue # 条件に合致しない場合はスキップ
-            except Exception as e:
-                sys.exit(f"エラー: 抽出条件の評価中に例外が発生しました: {e}")
+                if done or (
+                    args.max_records is not None and output_count >= args.max_records
+                ):
+                    pool.terminate()
+                    break
+        except Exception as e:
+            pool.terminate()
+            sys.exit(f"エラー: 処理中に例外が発生しました: {e}")
 
-        # 出力処理
-        if args.output == "binary":
-            sys.stdout.buffer.write(chunk)
-        else:
-            if args.record_num:
-                record = {'_rec_no': input_rec_no, **record}
-            if args.output == "json":
-                print(json.dumps(record, ensure_ascii=False))
-            else: # dict
-                print(record)
-
-        output_count += 1
-        if args.max_records is not None and output_count >= args.max_records:
-            break
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()  # Windows exe 化時に必要
     main()

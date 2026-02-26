@@ -8,6 +8,7 @@
 - アンパックした各フィールドに名前を付け、Python の式を用いた柔軟な抽出条件（フィルタリング）が可能です。
 - 出力形式は `dict` (Python の辞書表現), `json` (JSON Lines), `binary` (バイナリそのまま) から選択できます。
 - AST (抽象構文木) を用いた抽出条件の安全性チェックを実装しており、不正なコードの実行を防ぎます。
+- `multiprocessing.Pool` を用いたマルチコア並列処理に対応しており、巨大な入力データを効率よく処理できます。
 
 ## 使い方
 
@@ -121,6 +122,41 @@ python3 create_dummy.py | python3 main.py ">I10sh" "id,name,age" -c "_rec_no == 
 ```bash
 # 3番目以降のレコードを最大2件出力
 python3 create_dummy.py | python3 main.py ">I10sh" "id,name,age" -c "_rec_no >= 3" -n 2 --record-num
+```
+
+## 内部処理の最適化について
+
+巨大な入力データを効率よく処理するため、以下の最適化を実施しています。CLI の引数・使い方は変わりません。
+
+### マルチコア並列処理 (`multiprocessing.Pool`)
+
+- 入力ストリームを `BATCH_SIZE`（デフォルト: 256）レコード単位で読み込み、`multiprocessing.Pool.imap()` で複数のワーカープロセスに分散処理します。
+- 使用するワーカー数は `os.cpu_count()` に自動設定され、利用可能なすべての CPU コアを活用します。
+- **メインプロセス**: stdin の読み込みと stdout への書き込みのみ担当します。
+- **ワーカープロセス**: struct アンパック・BCD/Zone デコード・抽出条件評価（eval）を担当します。
+- `pool.imap()` により出力順序は入力順序と一致することが保証されます（`_rec_no` の整合性を維持）。
+- `--max-records` に達した時点で `pool.terminate()` により早期終了します。
+
+### ワーカー初期化の効率化
+
+- `struct.Struct` のコンパイルと条件式の `compile()` はワーカー起動時に **1 回だけ** 実行されます（`_worker_init()` 関数）。バッチごとに繰り返さないため、オーバーヘッドを削減します。
+
+### BCD / Zone デコードの整数演算最適化
+
+- 従来実装（`int(''.join(str(n) for n in nibbles))`）のリスト生成・文字列結合・int 変換の 3 ステップを、`value = value * 10 + nibble` の単純な整数演算ループに置き換えました。全レコード・全 BCD/Zone フィールドで効きます。
+
+### 出力のバッファリング
+
+- dict/json 出力: バッチ内の行を `'\n'.join(lines)` でまとめて `sys.stdout.write()` を 1 回呼び出します。
+- binary 出力: `sys.stdout.buffer.write(b''.join(chunks))` でバッチ単位に一括書き込みします。
+- いずれも `print()` / `write()` の呼び出し回数（システムコール数）を大幅に削減します。
+
+### チューニング
+
+`main.py` 冒頭の `BATCH_SIZE` 定数でバッチあたりのレコード数を変更できます。
+
+```python
+BATCH_SIZE = 256  # 大きいほど I/O 効率が上がるが、メモリ使用量も増える
 ```
 
 ## テストの実行
