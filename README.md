@@ -232,3 +232,14 @@ python3 -m pytest test_main.py -v
 ```bash
 rm -f .git/hooks/post-commit .git/hooks/post-checkout .git/hooks/post-merge .git/hooks/pre-push
 ```
+
+## Bash 3系で疑似連想配列
+
+```bash
+$ bash run.sh 
+[c119s]
+[file_div,others]
+[cs2s116s]
+[data_div,c1,c2,others]
+$ 
+```
