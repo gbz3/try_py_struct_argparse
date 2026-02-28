@@ -3,7 +3,7 @@ import struct
 from unittest.mock import patch
 import pytest
 
-from main import is_safe_expression, validate_args, parse_args, main, decode_bcd, decode_zone, parse_field_specs, get_format_type_codes
+from main import is_safe_expression, validate_args, parse_args, main, decode_bcd, decode_zone, parse_field_specs, get_format_type_codes, parse_nibble_set
 
 def test_is_safe_expression():
     allowed = ["id", "name", "age", "price"]
@@ -91,8 +91,8 @@ def test_decode_bcd_tail_positive():
     assert decode_bcd(b'\x01\x23\x4C', 'tail') == 1234
 
 def test_decode_bcd_tail_negative():
-    # 0x01 0x23 0x4D -> -1234
-    assert decode_bcd(b'\x01\x23\x4D', 'tail') == -1234
+    # 0x01 0x23 0x4D -> -1234 (tail, sign=D=負)
+    assert decode_bcd(b'\x01\x23\x4D', 'tail', frozenset({0xD})) == -1234
 
 def test_decode_bcd_tail_unsigned():
     # 0x01 0x23 0x4F -> +1234 (F=符号なし)
@@ -104,8 +104,8 @@ def test_decode_bcd_head_positive():
     assert decode_bcd(b'\xC0\x12\x34', 'head') == 1234
 
 def test_decode_bcd_head_negative():
-    # 0xD0 0x05 0x67 -> -567
-    assert decode_bcd(b'\xD0\x05\x67', 'head') == -567
+    # 0xD0 0x05 0x67 -> -567 (head, sign=D=負)
+    assert decode_bcd(b'\xD0\x05\x67', 'head', frozenset({0xD})) == -567
 
 def test_decode_bcd_none():
     # 0x12 0x34 -> 1234
@@ -142,7 +142,8 @@ def test_main_e2e_bcd_per_field_sign():
     stdin_mock = MockStdin(data)
     stdout_mock = io.StringIO()
 
-    with patch("sys.argv", ["main.py", ">I3s3s", "id,price:bcd:tail,discount:bcd:head", "-o", "dict"]), \
+    with patch("sys.argv", ["main.py", ">I3s3s", "id,price:bcd:tail,discount:bcd:head", "-o", "dict",
+                              "--bcd-nega-nibble", "0xd"]), \
          patch("sys.stdin", stdin_mock), \
          patch("sys.stdout", stdout_mock):
         main()
@@ -255,7 +256,7 @@ def test_decode_zone_tail_positive():
 
 def test_decode_zone_tail_negative():
     # 0xF1 0xF2 0xF3 0xD4 -> -1234 (tail, sign=D=負)
-    assert decode_zone(b'\xF1\xF2\xF3\xD4', 'tail') == -1234
+    assert decode_zone(b'\xF1\xF2\xF3\xD4', 'tail', frozenset({0xD})) == -1234
 
 def test_decode_zone_tail_unsigned():
     # 0xF1 0xF2 0xF3 0xF4 -> +1234 (tail, sign=F=符号なし→正)
@@ -267,7 +268,7 @@ def test_decode_zone_head_positive():
 
 def test_decode_zone_head_negative():
     # 0xD0 0xF5 0xF6 0xF7 -> -567 (head, sign=D=負)
-    assert decode_zone(b'\xD0\xF5\xF6\xF7', 'head') == -567
+    assert decode_zone(b'\xD0\xF5\xF6\xF7', 'head', frozenset({0xD})) == -567
 
 def test_decode_zone_none():
     # 0xF1 0xF2 0xF3 0xF4 -> 1234 (符号なし)
@@ -312,7 +313,8 @@ def test_main_e2e_zone_negative_dict():
     stdin_mock = MockStdin(data)
     stdout_mock = io.StringIO()
 
-    with patch("sys.argv", ["main.py", ">I4s", "id,amount:zone", "-o", "dict"]), \
+    with patch("sys.argv", ["main.py", ">I4s", "id,amount:zone", "-o", "dict",
+                              "--zone-nega-nibble", "0xd"]), \
          patch("sys.stdin", stdin_mock), \
          patch("sys.stdout", stdout_mock):
         main()
@@ -469,3 +471,55 @@ def test_main_e2e_on_decode_error_ignore():
     # print(dict) は repr を使うため chr(7) は '\x07' と表示される
     assert repr('\x07') in lines[1]  # repr('\x07') == "'\\x07'"
     assert "Carol" in lines[2]
+
+# --- parse_nibble_set ---
+
+def test_parse_nibble_set_single():
+    # 単一値: '0x7' -> frozenset({7})
+    assert parse_nibble_set('0x7', '--test') == frozenset({0x7})
+
+def test_parse_nibble_set_multiple():
+    # 複数値: '0x7,0xd' -> frozenset({7, 13})
+    assert parse_nibble_set('0x7,0xd', '--test') == frozenset({0x7, 0xD})
+
+def test_parse_nibble_set_invalid_hex():
+    # 無効な16進数山 0x1g -> SystemExit
+    with pytest.raises(SystemExit):
+        parse_nibble_set('0x1g', '--test')
+
+def test_parse_nibble_set_out_of_range():
+    # 範囲外 0x10 (=16) -> SystemExit
+    with pytest.raises(SystemExit):
+        parse_nibble_set('0x10', '--test')
+
+def test_decode_bcd_custom_nega_nibble():
+    # 0x7 を負符号ニブルとして指定した場合の BCD デコード
+    # 0x01 0x23 0x47 -> sign_nibble=0x7 -> 負 -> -1234
+    assert decode_bcd(b'\x01\x23\x47', 'tail', frozenset({0x7})) == -1234
+    # 0xD は負ニブルでないので正
+    assert decode_bcd(b'\x01\x23\x4D', 'tail', frozenset({0x7})) == 1234
+
+def test_decode_zone_custom_nega_nibble():
+    # 0x7 を負符号ニブルとして指定した場合の Zone デコード
+    # 0xF1 0xF2 0xF3 0x74 -> sign_nibble=(0x74>>4)&0x0F=0x7 -> 負 -> -1234
+    assert decode_zone(b'\xF1\xF2\xF3\x74', 'tail', frozenset({0x7})) == -1234
+    # 0xD は負ニブルでないので正
+    assert decode_zone(b'\xF1\xF2\xF3\xD4', 'tail', frozenset({0x7})) == 1234
+
+def test_main_e2e_bcd_custom_nega_nibble():
+    # --bcd-nega-nibble 0x7 指定時、0x7 が負符号になる E2E テスト
+    # price: 0x01 0x23 0x47 -> sign_nibble=0x7 -> 負 -> -1234
+    price_bcd = b'\x01\x23\x47'
+    data = struct.pack(">I3s", 1, price_bcd)
+
+    stdin_mock = MockStdin(data)
+    stdout_mock = io.StringIO()
+
+    with patch("sys.argv", ["main.py", ">I3s", "id,price:bcd", "-o", "dict",
+                              "--bcd-nega-nibble", "0x7"]), \
+         patch("sys.stdin", stdin_mock), \
+         patch("sys.stdout", stdout_mock):
+        main()
+
+    output = stdout_mock.getvalue()
+    assert "'price': -1234" in output

@@ -32,18 +32,21 @@ def get_format_type_codes(fmt: str) -> List[str]:
             type_codes.extend([code] * count)  # 3I は3つの int 値
     return type_codes
 
-def decode_bcd(data: bytes, sign_position: str) -> int:
+_DEFAULT_NEGA_NIBBLES: frozenset = frozenset({0x7})
+
+def decode_bcd(data: bytes, sign_position: str, nega_nibbles: frozenset = _DEFAULT_NEGA_NIBBLES) -> int:
     """
     パック10進数 (BCD) を整数に変換します。
     sign_position:
       'tail' : 最終バイトの下位ニブルが符号 (方式A/COBOL, デフォルト)
       'head' : 先頭バイトの上位ニブルが符号 (方式B)
       'none' : 符号なし、全ニブルが数字 (方式C)
-    符号ニブル: C(0xC)=正, D(0xD)=負, F(0xF)=符号なし(正)
+    nega_nibbles: 負符号とみなすニブル値の集合 (デフォルト: {0x7})
+      nega_nibbles に一致→負、それ以外はすべて正とみなす。
     """
     if sign_position == 'tail':
         sign_nibble = data[-1] & 0x0F
-        sign = -1 if sign_nibble == 0xD else 1
+        sign = -1 if sign_nibble in nega_nibbles else 1
         # 全バイトの上位ニブル + 最終バイト以外の下位ニブルが数字
         value = 0
         for i, byte in enumerate(data):
@@ -53,7 +56,7 @@ def decode_bcd(data: bytes, sign_position: str) -> int:
         return sign * value
     elif sign_position == 'head':
         sign_nibble = (data[0] >> 4) & 0x0F
-        sign = -1 if sign_nibble == 0xD else 1
+        sign = -1 if sign_nibble in nega_nibbles else 1
         # 先頭バイトの下位ニブル以降が数字
         value = 0
         for i, byte in enumerate(data):
@@ -70,7 +73,7 @@ def decode_bcd(data: bytes, sign_position: str) -> int:
             value = value * 10 + (byte & 0x0F)
         return value
 
-def decode_zone(data: bytes, sign_position: str) -> int:
+def decode_zone(data: bytes, sign_position: str, nega_nibbles: frozenset = _DEFAULT_NEGA_NIBBLES) -> int:
     """
     ゾーン10進数を整数に変換します。
     各バイトの下位ニブルが数字、上位ニブルがゾーン(0xF) または符号。
@@ -78,14 +81,15 @@ def decode_zone(data: bytes, sign_position: str) -> int:
       'tail' : 最終バイトの上位ニブルが符号 (COBOL/EBCDIC デフォルト)
       'head' : 先頭バイトの上位ニブルが符号
       'none' : 符号なし、全バイト上位ニブルはゾーン
-    符号ニブル: C(0xC)=正, D(0xD)=負, F(0xF)=符号なし(正)
+    nega_nibbles: 負符号とみなすニブル値の集合 (デフォルト: {0x7})
+      nega_nibbles に一致→負、それ以外はすべて正とみなす。
     """
     if sign_position == 'tail':
         sign_nibble = (data[-1] >> 4) & 0x0F
-        sign = -1 if sign_nibble == 0xD else 1
+        sign = -1 if sign_nibble in nega_nibbles else 1
     elif sign_position == 'head':
         sign_nibble = (data[0] >> 4) & 0x0F
-        sign = -1 if sign_nibble == 0xD else 1
+        sign = -1 if sign_nibble in nega_nibbles else 1
     else:  # 'none'
         sign = 1
     value = 0
@@ -157,6 +161,8 @@ _worker_bcd_sign: str = 'tail'
 _worker_zone_sign: str = 'tail'
 _worker_compiled_cond: Any = None
 _worker_on_decode_error: str = 'abort'
+_worker_bcd_nega_nibbles: frozenset = _DEFAULT_NEGA_NIBBLES
+_worker_zone_nega_nibbles: frozenset = _DEFAULT_NEGA_NIBBLES
 
 
 def _worker_init(
@@ -167,11 +173,14 @@ def _worker_init(
     zone_sign: str,
     condition_str: Optional[str],
     on_decode_error: str,
+    bcd_nega_nibbles: frozenset,
+    zone_nega_nibbles: frozenset,
 ) -> None:
     """各ワーカープロセスの起動時に一度だけ呼ばれる初期化関数。"""
     global _worker_st, _worker_field_specs, _worker_encoding
     global _worker_bcd_sign, _worker_zone_sign, _worker_compiled_cond
     global _worker_on_decode_error
+    global _worker_bcd_nega_nibbles, _worker_zone_nega_nibbles
     _worker_st = struct.Struct(fmt)
     _worker_field_specs = field_specs
     _worker_encoding = encoding
@@ -179,6 +188,8 @@ def _worker_init(
     _worker_zone_sign = zone_sign
     _worker_compiled_cond = compile(condition_str, '<string>', 'eval') if condition_str else None
     _worker_on_decode_error = on_decode_error
+    _worker_bcd_nega_nibbles = bcd_nega_nibbles
+    _worker_zone_nega_nibbles = zone_nega_nibbles
 
 
 def _process_batch(
@@ -207,10 +218,10 @@ def _process_batch(
             if isinstance(value, bytes):
                 if annotation == 'bcd':
                     sign = sign_override if sign_override else _worker_bcd_sign
-                    value = decode_bcd(value, sign)
+                    value = decode_bcd(value, sign, _worker_bcd_nega_nibbles)
                 elif annotation == 'zone':
                     sign = sign_override if sign_override else _worker_zone_sign
-                    value = decode_zone(value, sign)
+                    value = decode_zone(value, sign, _worker_zone_nega_nibbles)
                 else:
                     if _worker_on_decode_error == 'ignore':
                         value = value.rstrip(b'\x00').decode(_worker_encoding, errors='ignore')
@@ -328,9 +339,48 @@ def parse_args() -> argparse.Namespace:
              "null=フィールドをNoneにして継続、ignore=デコード不能バイトを除去して継続"
              "（文字列フィールドのみ有効、BCD/Zone には影響なし）"
     )
+    parser.add_argument(
+        "--bcd-nega-nibble",
+        default="0x7",
+        dest="bcd_nega_nibble",
+        metavar="HEX[,HEX...]",
+        help="BCD の負符号とみなすニブル値（カンマ区切り16進数, デフォルト: 0x7）。"
+             "例: 0xd  または  0x7,0xd"
+    )
+    parser.add_argument(
+        "--zone-nega-nibble",
+        default="0x7",
+        dest="zone_nega_nibble",
+        metavar="HEX[,HEX...]",
+        help="Zone の負符号とみなすニブル値（カンマ区切り16進数, デフォルト: 0x7）。"
+             "例: 0xd  または  0x7,0xd"
+    )
     return parser.parse_args()
 
 _VALID_SIGN_POSITIONS = {'tail', 'head', 'none'}
+
+def parse_nibble_set(text: str, argname: str) -> frozenset:
+    """
+    カンマ区切りの16進数文字列を frozenset[int] に変換します。
+    例: '0x7'     -> frozenset({7})
+        '0x7,0xd' -> frozenset({7, 13})
+    0〜15 の範囲外の値は sys.exit() でエラーを出します。
+    """
+    result = set()
+    for token in text.split(','):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            val = int(token, 16)
+        except ValueError:
+            sys.exit(f"エラー: {argname} の値 '{token}' は有効な16進数ではありません。")
+        if not (0 <= val <= 15):
+            sys.exit(f"エラー: {argname} の値 '{token}' はニブル値の範囲 (0x0〜0xf) を超えています。")
+        result.add(val)
+    if not result:
+        sys.exit(f"エラー: {argname} に有効な値が指定されていません。")
+    return frozenset(result)
 
 def validate_args(args: argparse.Namespace) -> Tuple[struct.Struct, List[Tuple[str, Optional[str], Optional[str]]]]:
     # エンコーディングのチェック
@@ -382,6 +432,10 @@ def validate_args(args: argparse.Namespace) -> Tuple[struct.Struct, List[Tuple[s
         if not is_safe_expression(args.condition, field_names + ['_rec_no']):
             sys.exit("エラー: 抽出条件の式が安全ではありません。")
 
+    # nega_nibble オプションのパース
+    args.bcd_nega_nibbles = parse_nibble_set(args.bcd_nega_nibble, '--bcd-nega-nibble')
+    args.zone_nega_nibbles = parse_nibble_set(args.zone_nega_nibble, '--zone-nega-nibble')
+
     return st, field_specs
 
 def main():
@@ -399,6 +453,8 @@ def main():
         args.zone_sign,
         args.condition,
         args.on_decode_error,
+        args.bcd_nega_nibbles,
+        args.zone_nega_nibbles,
     )
 
     output_count = 0
