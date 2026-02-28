@@ -156,6 +156,7 @@ _worker_encoding: str = 'cp932'
 _worker_bcd_sign: str = 'tail'
 _worker_zone_sign: str = 'tail'
 _worker_compiled_cond: Any = None
+_worker_on_decode_error: str = 'abort'
 
 
 def _worker_init(
@@ -165,16 +166,19 @@ def _worker_init(
     bcd_sign: str,
     zone_sign: str,
     condition_str: Optional[str],
+    on_decode_error: str,
 ) -> None:
     """各ワーカープロセスの起動時に一度だけ呼ばれる初期化関数。"""
     global _worker_st, _worker_field_specs, _worker_encoding
     global _worker_bcd_sign, _worker_zone_sign, _worker_compiled_cond
+    global _worker_on_decode_error
     _worker_st = struct.Struct(fmt)
     _worker_field_specs = field_specs
     _worker_encoding = encoding
     _worker_bcd_sign = bcd_sign
     _worker_zone_sign = zone_sign
     _worker_compiled_cond = compile(condition_str, '<string>', 'eval') if condition_str else None
+    _worker_on_decode_error = on_decode_error
 
 
 def _process_batch(
@@ -198,6 +202,7 @@ def _process_batch(
         unpacked_data = _worker_st.unpack(chunk)  # type: ignore[union-attr]
 
         record: Dict[str, Any] = {}
+        decode_error = False
         for (name, annotation, sign_override), value in zip(_worker_field_specs, unpacked_data):  # type: ignore[arg-type]
             if isinstance(value, bytes):
                 if annotation == 'bcd':
@@ -207,8 +212,24 @@ def _process_batch(
                     sign = sign_override if sign_override else _worker_zone_sign
                     value = decode_zone(value, sign)
                 else:
-                    value = value.rstrip(b'\x00').decode(_worker_encoding)
+                    if _worker_on_decode_error == 'ignore':
+                        value = value.rstrip(b'\x00').decode(_worker_encoding, errors='ignore')
+                    elif _worker_on_decode_error in ('skip', 'null'):
+                        try:
+                            value = value.rstrip(b'\x00').decode(_worker_encoding)
+                        except Exception as e:
+                            print(f"警告: レコード {rec_no}, フィールド '{name}': {e}", file=sys.stderr)
+                            if _worker_on_decode_error == 'skip':
+                                decode_error = True
+                                break
+                            else:  # null
+                                value = None
+                    else:  # abort
+                        value = value.rstrip(b'\x00').decode(_worker_encoding)
             record[name] = value
+        if decode_error:
+            results.append((rec_no, chunk, None))
+            continue
 
         if _worker_compiled_cond is not None:
             eval_locals = {**record, '_rec_no': rec_no}
@@ -298,6 +319,15 @@ def parse_args() -> argparse.Namespace:
         help="出力レコードの先頭に入力レコード番号 '_rec_no'（1始まり）を付与します。-o binary では無効。"
              " --condition 内では --record-num 指定の有無に関わらず '_rec_no' を常に参照できます。"
     )
+    parser.add_argument(
+        "--on-decode-error",
+        choices=["abort", "skip", "null", "ignore"],
+        default="abort",
+        dest="on_decode_error",
+        help="デコードエラー発生時の動作: abort=即時中止（デフォルト）、skip=レコードをスキップ、"
+             "null=フィールドをNoneにして継続、ignore=デコード不能バイトを除去して継続"
+             "（文字列フィールドのみ有効、BCD/Zone には影響なし）"
+    )
     return parser.parse_args()
 
 _VALID_SIGN_POSITIONS = {'tail', 'head', 'none'}
@@ -368,6 +398,7 @@ def main():
         args.bcd_sign,
         args.zone_sign,
         args.condition,
+        args.on_decode_error,
     )
 
     output_count = 0

@@ -208,7 +208,7 @@ def test_main_e2e_max_records():
          patch("sys.stdout", stdout_mock):
         main()
 
-    lines = [l for l in stdout_mock.getvalue().strip().split("\n") if l]
+    lines = [line for line in stdout_mock.getvalue().strip().split("\n") if line]
     assert len(lines) == 2
     assert "'name': 'Alice'" in lines[0]
     assert "'name': 'Bob'" in lines[1]
@@ -228,7 +228,7 @@ def test_main_e2e_max_records_with_condition():
          patch("sys.stdout", stdout_mock):
         main()
 
-    lines = [l for l in stdout_mock.getvalue().strip().split("\n") if l]
+    lines = [line for line in stdout_mock.getvalue().strip().split("\n") if line]
     assert len(lines) == 1
     assert "'name': 'Bob'" in lines[0]
 
@@ -335,7 +335,7 @@ def test_main_e2e_record_num_dict():
          patch("sys.stdout", stdout_mock):
         main()
 
-    lines = [l for l in stdout_mock.getvalue().strip().split("\n") if l]
+    lines = [line for line in stdout_mock.getvalue().strip().split("\n") if line]
     assert len(lines) == 2
     assert "'_rec_no': 1" in lines[0]
     assert "'_rec_no': 2" in lines[1]
@@ -357,7 +357,7 @@ def test_main_e2e_record_num_condition():
          patch("sys.stdout", stdout_mock):
         main()
 
-    lines = [l for l in stdout_mock.getvalue().strip().split("\n") if l]
+    lines = [line for line in stdout_mock.getvalue().strip().split("\n") if line]
     assert len(lines) == 1
     assert '"name": "Bob"' in lines[0]
 
@@ -375,7 +375,7 @@ def test_main_e2e_record_num_skipped_count():
          patch("sys.stdout", stdout_mock):
         main()
 
-    lines = [l for l in stdout_mock.getvalue().strip().split("\n") if l]
+    lines = [line for line in stdout_mock.getvalue().strip().split("\n") if line]
     assert len(lines) == 1
     # Bob は入力2番目なので _rec_no == 2
     assert "'_rec_no': 2" in lines[0]
@@ -394,3 +394,78 @@ def test_main_e2e_record_num_not_in_binary():
         main()
 
     assert stdout_mock.buffer.getvalue() == data1
+
+def test_main_e2e_on_decode_error_skip():
+    # --on-decode-error skip: decode エラーのレコードがスキップされること
+    # レコード2の name として cp932 で不正なバイト列を使用
+    invalid_name = b'\x81\x07' + b'\x00' * 8
+    data  = struct.pack(">I", 1) + "Alice".encode("cp932").ljust(10, b'\x00') + struct.pack(">h", 25)
+    data += struct.pack(">I", 2) + invalid_name + struct.pack(">h", 30)
+    data += struct.pack(">I", 3) + "Carol".encode("cp932").ljust(10, b'\x00') + struct.pack(">h", 35)
+
+    stdin_mock = MockStdin(data)
+    stdout_mock = io.StringIO()
+    stderr_mock = io.StringIO()
+
+    with patch("sys.argv", ["main.py", ">I10sh", "id,name,age", "--on-decode-error", "skip"]), \
+         patch("sys.stdin", stdin_mock), \
+         patch("sys.stdout", stdout_mock), \
+         patch("sys.stderr", stderr_mock):
+        main()
+
+    lines = [line for line in stdout_mock.getvalue().strip().split("\n") if line]
+    # レコード2はスキップされ2件のみ出力
+    assert len(lines) == 2
+    assert "Alice" in lines[0]
+    assert "Carol" in lines[1]
+
+def test_main_e2e_on_decode_error_null():
+    # --on-decode-error null: decode エラーのフィールドが None になること
+    invalid_name = b'\x81\x07' + b'\x00' * 8
+    data  = struct.pack(">I", 1) + "Alice".encode("cp932").ljust(10, b'\x00') + struct.pack(">h", 25)
+    data += struct.pack(">I", 2) + invalid_name + struct.pack(">h", 30)
+    data += struct.pack(">I", 3) + "Carol".encode("cp932").ljust(10, b'\x00') + struct.pack(">h", 35)
+
+    stdin_mock = MockStdin(data)
+    stdout_mock = io.StringIO()
+    stderr_mock = io.StringIO()
+
+    with patch("sys.argv", ["main.py", ">I10sh", "id,name,age", "--on-decode-error", "null"]), \
+         patch("sys.stdin", stdin_mock), \
+         patch("sys.stdout", stdout_mock), \
+         patch("sys.stderr", stderr_mock):
+        main()
+
+    lines = [line for line in stdout_mock.getvalue().strip().split("\n") if line]
+    # 3件全て出力
+    assert len(lines) == 3
+    assert "Alice" in lines[0]
+    # レコード2 の name が None
+    assert "'name': None" in lines[1]
+    assert "Carol" in lines[2]
+
+def test_main_e2e_on_decode_error_ignore():
+    # --on-decode-error ignore: decode 不能バイトが除去されて継続すること
+    invalid_name = b'\x81\x07' + b'\x00' * 8
+    data  = struct.pack(">I", 1) + "Alice".encode("cp932").ljust(10, b'\x00') + struct.pack(">h", 25)
+    data += struct.pack(">I", 2) + invalid_name + struct.pack(">h", 30)
+    data += struct.pack(">I", 3) + "Carol".encode("cp932").ljust(10, b'\x00') + struct.pack(">h", 35)
+
+    stdin_mock = MockStdin(data)
+    stdout_mock = io.StringIO()
+    stderr_mock = io.StringIO()
+
+    with patch("sys.argv", ["main.py", ">I10sh", "id,name,age", "--on-decode-error", "ignore"]), \
+         patch("sys.stdin", stdin_mock), \
+         patch("sys.stdout", stdout_mock), \
+         patch("sys.stderr", stderr_mock):
+        main()
+
+    lines = [line for line in stdout_mock.getvalue().strip().split("\n") if line]
+    # 3件全て出力（エラーなし）
+    assert len(lines) == 3
+    assert "Alice" in lines[0]
+    # レコード2: 0x81は除去され、0x07（chr(7)）が name に残る
+    # print(dict) は repr を使うため chr(7) は '\x07' と表示される
+    assert repr('\x07') in lines[1]  # repr('\x07') == "'\\x07'"
+    assert "Carol" in lines[2]

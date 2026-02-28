@@ -41,6 +41,12 @@ cat input.bin | python3 main.py <format> <fields> [options]
   - `none`: 符号なし（全バイト上位ニブルはゾーン）
 - `-n`, `--max-records`: 出力レコードの最大件数 (`N`)。N 件に達した時点で処理を中止します。省略時は無制限です。`--condition` と組み合わせた場合、条件を通過した件数が上限の基準になります。
 - `--record-num`: 出力レコードの先頭に入力レコード番号フィールド `_rec_no`（1始まり）を付与します。`-o binary` の場合は無効です。なお、`--condition` 内では本フラグの指定有無に関わらず `_rec_no` を常に参照できます。`--condition` でスキップされたレコードも番号にカウントされるため、`_rec_no` は常に入力ファイル内の位置を示します。
+- `--on-decode-error`: 文字列フィールドのデコードエラー発生時の動作を指定します（デフォルト: `abort`）。
+  - `abort`: 即時中止します（デフォルト）。
+  - `skip`: エラーが発生したレコードをスキップして処理を継続します。エラー内容は stderr に警告として出力されます。
+  - `null`: エラーが発生したフィールドを `None` にして処理を継続します。エラー内容は stderr に警告として出力されます。
+  - `ignore`: デコード不能なバイトを除去した文字列として処理を継続します（`errors="ignore"` と同等）。警告は出力されません。
+  - **注意**: `:bcd` / `:zone` フィールドは対象外です（BCD/Zone は算術変換のため UnicodeDecodeError が発生しません）。
 
 ### 実行例
 
@@ -122,6 +128,24 @@ python3 create_dummy.py | python3 main.py ">I10sh" "id,name,age" -c "_rec_no == 
 ```bash
 # 3番目以降のレコードを最大2件出力
 python3 create_dummy.py | python3 main.py ">I10sh" "id,name,age" -c "_rec_no >= 3" -n 2 --record-num
+```
+
+**13. デコードエラーのあるレコードをスキップして処理を継続**
+```bash
+# UnicodeDecodeError が発生したレコードを除外し、残りのレコードを出力する
+cat input.bin | python3 main.py ">I10sh" "id,name,age" --on-decode-error skip
+```
+
+**14. デコードエラーのあるフィールドを None にして処理を継続**
+```bash
+# エラーフィールドを None にして全レコードを出力する
+cat input.bin | python3 main.py ">I10sh" "id,name,age" --on-decode-error null -o json
+```
+
+**15. デコード不能バイトを除去して処理を継続**
+```bash
+# 不正バイトを無音で除去し、文字列として継続処理する
+cat input.bin | python3 main.py ">I10sh" "id,name,age" --on-decode-error ignore
 ```
 
 ## 内部処理の最適化について
