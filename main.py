@@ -134,7 +134,14 @@ def is_safe_expression(expr: str, allowed_names: List[str]) -> bool:
             ast.BoolOp, ast.And, ast.Or,
             ast.UnaryOp, ast.Not, ast.USub, ast.UAdd,
             ast.BinOp, ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod, ast.FloorDiv, ast.Pow,
-            ast.Constant, # 数値、文字列、True, False, None
+            ast.Constant,       # 数値、文字列、True, False, None（3.8+）
+            # Python 3.8 旧形式の互換ノード (3.12 で削除済みのため getattr で取得)
+            *[n for n in [
+                getattr(ast, 'Str', None),
+                getattr(ast, 'Num', None),
+                getattr(ast, 'Bytes', None),
+                getattr(ast, 'NameConstant', None),
+            ] if n is not None],
             ast.Load
         )):
             continue
